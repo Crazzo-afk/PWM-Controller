@@ -1,7 +1,3 @@
-/*
- * Copyright (c) 2024 YYJR
- * SPDX-License-Identifier: Apache-2.0
- */
 `default_nettype none
 
 module tt_um_pwm_8ch_10b (
@@ -30,7 +26,7 @@ module tt_um_pwm_8ch_10b (
         else        wr_sync <= {wr_sync[1:0], wr_raw};
     wire wr_pulse = (wr_sync[2:1] == 2'b01);
 
-    // Duty storage: no reset. Write every channel before enabling.
+    // Duty storage: no reset (smaller flops). Write every channel before enabling.
     reg [7:0] duty_lo [0:7];
     reg [1:0] duty_hi [0:7];
     reg [3:0] pre_reg;
@@ -56,27 +52,38 @@ module tt_um_pwm_8ch_10b (
     wire pwm_tick = slot_end && (pre_cnt == pre_reg);
 
     always @(posedge clk or negedge rst_n) begin
-        if (!rst_n || !en) begin
-            scan <= 3'd0; pre_cnt <= 4'd0; pwm_cnt <= 10'd0;
-        end else begin
-            scan <= scan + 3'd1;
-            if (slot_end) begin
-                if (pre_cnt == pre_reg) begin
-                    pre_cnt <= 4'd0;
-                    pwm_cnt <= pwm_cnt + 10'd1;
-                end else
-                    pre_cnt <= pre_cnt + 4'd1;
+    if (!rst_n) begin
+        scan    <= 3'd0;
+        pre_cnt <= 4'd0;
+        pwm_cnt <= 10'd0;
+    end else if (!en) begin
+        scan    <= 3'd0;
+        pre_cnt <= 4'd0;
+        pwm_cnt <= 10'd0;
+    end else begin
+        scan <= scan + 3'd1;
+        if (slot_end) begin
+            if (pre_cnt == pre_reg) begin
+                pre_cnt <= 4'd0;
+                pwm_cnt <= pwm_cnt + 10'd1;
+            end else begin
+                pre_cnt <= pre_cnt + 4'd1;
             end
         end
     end
+end
 
     // One shared comparator, one channel per clock
     wire [9:0] duty_sel = {duty_hi[scan], duty_lo[scan]};
     reg  [7:0] pwm_out;
     always @(posedge clk or negedge rst_n) begin
-        if (!rst_n || !en) pwm_out <= 8'b0;
-        else                      pwm_out[scan] <= (pwm_cnt < duty_sel);
-    end
+    if (!rst_n)
+        pwm_out <= 8'b0;
+    else if (!en)
+        pwm_out <= 8'b0;
+    else
+        pwm_out[scan] <= (pwm_cnt < duty_sel);
+end
 
     assign uo_out     = pwm_out;
     assign uio_out[7] = pwm_tick && (&pwm_cnt) && en;  // end-of-period pulse
