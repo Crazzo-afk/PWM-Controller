@@ -1,27 +1,83 @@
 /*
- * Copyright (c) 2024 Your Name
+ * Copyright (c) 2024 YYJR
  * SPDX-License-Identifier: Apache-2.0
  */
-
 `default_nettype none
 
-module tt_um_example (
-    input  wire [7:0] ui_in,    // Dedicated inputs
-    output wire [7:0] uo_out,   // Dedicated outputs
-    input  wire [7:0] uio_in,   // IOs: Input path
-    output wire [7:0] uio_out,  // IOs: Output path
-    output wire [7:0] uio_oe,   // IOs: Enable path (active high: 0=input, 1=output)
-    input  wire       ena,      // always 1 when the design is powered, so you can ignore it
-    input  wire       clk,      // clock
-    input  wire       rst_n     // reset_n - low to reset
+module tt_um_pwm_8ch_10b (
+    input  wire [7:0] ui_in,
+    output wire [7:0] uo_out,
+    input  wire [7:0] uio_in,
+    output wire [7:0] uio_out,
+    output wire [7:0] uio_oe,
+    input  wire       ena,
+    input  wire       clk,
+    input  wire       rst_n
 );
+    assign uio_oe       = 8'b1000_0000;
+    assign uio_out[6:0] = 7'b0;
 
-  // All output pins must be assigned. If not used, assign to 0.
-  assign uo_out  = ui_in + uio_in;  // Example: ou_out is the sum of ui_in and uio_in
-  assign uio_out = 0;
-  assign uio_oe  = 0;
+    wire [2:0] ch_sel    = uio_in[2:0];
+    wire [1:0] reg_sel   = uio_in[4:3];  // 00: duty[7:0], 01: duty[9:8], 10: prescaler[3:0]
+    wire       we_raw    = uio_in[5];
+    wire       global_en = uio_in[6];
+    wire _unused = &{ena, uio_in[7], ui_in[7:4], 1'b0};
 
-  // List all unused inputs to prevent warnings
-  wire _unused = &{ena, clk, rst_n, 1'b0};
+    // Write-enable synchronizer + rising-edge detect
+    reg [2:0] we_sync;
+    always @(posedge clk or negedge rst_n)
+        if (!rst_n) we_sync <= 3'b0;
+        else        we_sync <= {we_sync[1:0], we_raw};
+    wire we_pulse = (we_sync[2:1] == 2'b01);
 
+    // Duty storage: no reset. Write every channel before enabling.
+    reg [7:0] duty_lo [0:7];
+    reg [1:0] duty_hi [0:7];
+    reg [3:0] pre_reg;
+
+    always @(posedge clk) begin
+        if (we_pulse) begin
+            case (reg_sel)
+                2'b00: duty_lo[ch_sel] <= ui_in;
+                2'b01: duty_hi[ch_sel] <= ui_in[1:0];
+                default: ;
+            endcase
+        end
+    end
+    always @(posedge clk or negedge rst_n)
+        if (!rst_n)                          pre_reg <= 4'd0;
+        else if (we_pulse && reg_sel == 2'b10) pre_reg <= ui_in[3:0];
+
+    // Scan counter, prescaler, PWM counter
+    reg [2:0] scan;
+    reg [3:0] pre_cnt;
+    reg [9:0] pwm_cnt;
+    wire slot_end = (scan == 3'd7);
+    wire pwm_tick = slot_end && (pre_cnt == pre_reg);
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n || !global_en) begin
+            scan <= 3'd0; pre_cnt <= 4'd0; pwm_cnt <= 10'd0;
+        end else begin
+            scan <= scan + 3'd1;
+            if (slot_end) begin
+                if (pre_cnt == pre_reg) begin
+                    pre_cnt <= 4'd0;
+                    pwm_cnt <= pwm_cnt + 10'd1;
+                end else
+                    pre_cnt <= pre_cnt + 4'd1;
+            end
+        end
+    end
+
+    // One shared comparator, one channel per clock
+    wire [9:0] duty_sel = {duty_hi[scan], duty_lo[scan]};
+    reg  [7:0] pwm_out;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n || !global_en) pwm_out <= 8'b0;
+        else                      pwm_out[scan] <= (pwm_cnt < duty_sel);
+    end
+
+    assign uo_out     = pwm_out;
+    assign uio_out[7] = pwm_tick && (&pwm_cnt) && global_en;  // end-of-period pulse
 endmodule
